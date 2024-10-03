@@ -1,0 +1,286 @@
+\documentclass[12pt, a4paper]{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage[style=numeric, citestyle=authoryear, backend=biber]{biblatex}
+\usepackage[greek, british]{babel}
+\usepackage{alphabeta}
+\usepackage{libertine}
+\usepackage{csquotes}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{mathtools}
+\usepackage[a4paper,margin=1in,footskip=0.25in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{hyperref}
+% \pagenumbering{arabic}
+
+\graphicspath{ {./results/} }
+\addbibresource{refs.bib}
+
+\newcommand{\loss}{\mathcal{L}}
+\newcommand{\threshold}{\mathcal{T}}
+
+\def\code#1{\texttt{#1}}
+
+\title{\Huge Investigating Pseudo-labeling Without Supporting Algorithms and Models}
+
+\author{\LARGE Tsirmpas Dimitris}
+
+\begin{document}
+
+	\maketitle
+	\begin{abstract}
+	
+		Pseudo-labeling is a promising paradigm in semi-supervised learning for leveraging unlabeled data alongside limited labeled data. However, most state-of-the-art approaches rely on complex models and additional algorithms beyond pseudo-labeling itself. In this paper, we investigate a simpler approach to pseudo-labeling that minimizes training costs by only using the original model with minimal hyperparameter tuning. We evaluate the performance of our algorithm on the MNIST/MNIST-M and Modern Office-31 datasets, covering scenarios with varying degrees of domain shift between the source and target distributions. Our experiments reveal useful insights into the weaknesses of pseudo-labeling in the absence of supporting specialized algorithms. We find that while pseudo-labeling alone provides some benefit in the MNIST/MNIST-M case, it struggles significantly on the more challenging Modern Office-31 task. Importantly, we demonstrate that incorporating even a small amount of labeled target data during the initial pretraining phase can substantially improve the effectiveness of subsequent pseudo-labeling. Overall, our work highlights the potential and limitations of a simplified pseudo-labeling approach and emphasizes the importance of careful evaluation on datasets with significant distribution shifts.
+	\end{abstract}
+	
+	\pagenumbering{arabic} % Switch to Arabic numbering
+	
+	\section{Introduction}
+	
+	In the domain of deep learning, the quest for developing models that can leverage enormous sources of unlabeled data, in addition to limited labeled data, has spawned different paradigms for semi-supervised learning. In this regard, pseudo-labeling has emerged as one of the leading paradigms, promising a path toward bridging the chasm between supervised and unsupervised learning because of its simplicity, effectiveness, and adaptability across various tasks, especially computer vision tasks such as image classification. 
+	
+	The core of pseudo-labeling lies in the principle of iterative refinement of model predictions over unlabeled data. Given a model trained on a small labeled dataset, predictions are made on the unlabeled data. Those predictions are used to assign pseudo-labels to the unlabeled instances, effectively enlarging the labeled dataset. Further, the model is trained again on the augmented dataset in an iterative fashion, refining its performance and pseudo-labeling accuracy. It thus aims to gradually align the feature distributions of the source and target domains.
+	
+	The efficiency of pseudo-labeling is conditioned on several key factors: the quality of the initially labeled data, the heuristics of pseudo-labeling, and the model architecture. These conditions have led to the inception of several algorithms, tightly coupled with specialized models able to learn domain-invariant features from both datasets. However, the level of complexity and cost to these models can be daunting, with most recent approaches necessitating multiple Deep Neural Network models (DNNs) as well as a suite of additional algorithms and training frameworks. 
+	
+	In this paper we experiment using a simple, alternative approach to training models on both unsupervised and semi-supervised datasets. Our approach seeks to minimize the training cost, only necessitating the presence of the original model, and keeping additional tuning hyper-parameters to a minimum. We evaluate the performance of our algorithm on both a small and large dataset, and extract useful insights on the weaknesses of pseudo-labeled data in the absence of the aforementioned specialized algorithms. The dataset, code and implementation notes can be found in the following repository \footnote{\url{https://github.com/dimits-ts/deep\_vision\_domain\_adaptation}}.
+	
+	
+	\section{Related Works}
+	
+	Many methods have been proven to work for the task of domain-adaptation. Two of the most intuitive and direct solutions were those of Deep Correlation Alignment (CORAL) \parencite{coral}, used frequently in modern research for the creation of solid baseline models, and pseudo-labeling.
+	
+	Pseudo-labeling was first introduced to DNNs by \cite{pseudo-label-original}. The assumption behind the procedure is that data points are clustered according to their class, which the discriminator needs to find the border of. By using pseudo-labeling, the discriminator can refine the border regions of these clusters by gradually including data points further and further from the cluster's center. Thus, pseudo-labeling can be seen as a form of Entropy Regularization \parencite{entropy-regularization}.
+	
+	One of the ways where pseudo-labeling fails was explored by \cite{pseudo-label-evaluation}. As demonstrated in the "twins-moons" dataset, should the initial clusters not be evaluated correctly at the beginning of the algorithm, the discriminator could learn an entirely wrong decision boundary. A classic example of this happening would be very few initial samples being used during training. In the context of domain adaptation however, it could also be caused by a sufficiently large gap between the source and target distributions.
+	
+	The latter issue is the primary reason for the current gallery of additional models and algorithms involved in the main training loop of SOTA domain adaptation systems using pseudo-labeling. \cite{good-practices} outline most of the most commonly used algorithms, including model regularization, outlier filtering (using the cluster assumption introduced by \cite{pseudo-label-original}) and domain alignment. \cite{model-survey} showcase modern SOTA models from different domain-adaptation approaches, as well as a review of common datasets.
+	
+	In the original pseudo-labeling paper, \cite{pseudo-label-original} proposed a training loop where both the source and target distributions were considered at different points in time using a weighted sum of losses from both datasets. Specifically, $\loss = \loss_{source} + a(t) * \loss_{target}$, where $\alpha(t) = 
+	\begin{cases} 0 & \text{if } t < T_1 \\
+		\frac{t-T_1}{T_2-T_1}\alpha_f & \text{if } T_1 \leq t \leq T_2 \\
+		\alpha_f & \text{if } T_2 < t
+	\end{cases}$
+	where $T_1, T_2, \alpha_f$ hyperparameters. This approach however requires the definition of multiple hyperparameters, requiring the existence of an extensive target validation set, which is usually hard to construct, given the problem formulation of domain adaptation. \cite{three-models} propose a standard    training loop, while selecting samples based on majority vote by two independent classifiers with artificially distinct feature distributions. While promising, this requires the separate training of 3 models, effectively tripling computational costs. \cite{ican} propose a different method of scheduling the source and target dataset losses, which we elaborate on later in this paper.
+	
+	Finally, \cite{pseudo-label-evaluation} denote a number of important steps towards correctly evaluating pseudo-labeling algorithms. Notably, they stress the importance of not over-tweaking hyperparameters since, as stated above, large validation steps are unrealistic in domain adaptation tasks. They also note that these algorithms need to be evaluated on datasets with significant distribution shift between the two domains, since those are the cases where pseudo-labeling techniques are especially vulnerable.
+	
+	
+	\section{Pseudo-labeling for Classification Enhancement}
+	
+	\subsection{Theoretical background}
+	
+	
+	Let $D_{source} = \{x_i^s, y_i^s\}, i=1,2,\cdots, N_{source}$ be the set containing the training samples from the source dataset, and $D_{target} = \{x_i^t\}, i=1,2,\cdots, N_{target}$ the equivalent from the target dataset. In domain adaptation tasks we assume that the distributions of $D_{source}$ and $D_{target}$ differ significantly, thus we can not simply train a classifier on $D_{source}$ and expect satisfactory results on $D_{target}$.
+	
+	Pseudo-labeling uses the probability estimates of a model to create labels $y_i^t$ for the target samples $\{x_i^t\} \in D_{target}$. Given the estimate $p(C | x_i^t; \Theta)$, where $\Theta$ the model parameters and $C$ the class label, we assume that $y_i^t = argmax_c{p(c | x_i^t; \Theta)}$. These samples are then added to the training dataset alongside $D_{source}$ samples. The value $max_c{p(c | x_i^t; \Theta)}$ is often called the \texttt{classification confidence score} of the sample. 
+	
+	This strategy appears easy and intuitive but holds major caveats. If we applied the following algorithm on the entire $D_{target}$ dataset, it is certain that the training would fail because of mislabeled samples, since, had the model's pseudo-predictions been mostly correct, there would be no incentive for the domain adaptation task in the first place. Thus, most such strategies employ an iterative approach, where only samples with a high certainty of correct classification are selected for training. This certainty is usually defined either as a high enough classification score using the same model, or via majority voting by a selection of similar models.
+	
+	
+	\subsection{Model-agnostic Pseudo-labeling algorithm}
+	\label{ssec:our-algorithm}
+	
+	We use a modified version of the iCAN algorithm \parencite{ican}. The original iCAN algorithm was designed around a model created with the explicit purpose of learning domain-invariant features between the source and target datasets (CAN model). When the unmodified algorithm uses a generic deep model however a number of issues arise. Our approach seeks to remedy the most major of those issues.
+	
+	First of all, in the original paper, the authors propose adding the loss of the fully supervised dataset $\loss_{source}$, the loss of the target dataset $\loss_{tar}$ and the loss of their model's domain-agnostic penalty $\loss_{CAN}$ for each mini-batch as $\loss = \loss_{source} + \loss_{tar} + \loss_{CAN}$. This design decision most likely exists because of the need to have both a source and a target mini batch loaded on the network in order to calculate $\loss_{CAN}$. Since this penalty does not exist in our algorithm, we instead split the training epoch into distinct backward passes for the source and target mini-batches, in order to reduce GPU VRAM requirements.
+	
+	Secondly, the original iCAN algorithm selects pseudo-labeled batches for each backward pass because of the aforementioned mini-batch requirements. Since our algorithm proves much more unstable, as the underlying generic model may not learn domain-agnostic features, we instead perform pseudo-labeling once every $N_{period}$ epochs. This mechanism ensures that our model will have acquired knowledge of the target distribution from the previously selected pseudo-labeled samples, before being asked to perform pseudo-labeling on the less-easily classifiable, unlabeled samples.
+	
+	Thirdly, we do not use the "domain bias reweighing function" used by the original authors when calculating $\loss_{tar}$. Aside from necessitating a second "domain" classifier, the sampling strategy we employ is inverse to the one proposed by the authors. iCAN attempts to select samples that do not fit the source distribution, in order to prevent its model from selecting target samples that are very similar to the source dataset (since they would score higher confidence scores). Our model-agnostic algorithm attempts to select samples that are closer to the source distribution and, as the model becomes more accustomed to the target distribution, slowly include samples closer to the latter. This is also the motivation behind not re-labeling pseudo-labeled samples.
+		
+	The modified procedure can be found in Algorithm \ref{al::modified-ican}, where $\%$ is the modulo operator. The \texttt{adaptive\_threshold} function is defined in Section \ref{ssec:threshold}.
+	
+	\begin{algorithm}
+		\caption{Modified general incremental learning algorithm} 
+		\label{al::modified-ican}
+		\begin{algorithmic}[1]	
+			\State Train model on dataset $D_{source}$
+			
+			\State $D_{pseudo}$ = \{\}
+			
+			\For{epoch}
+				\If {$epoch \% N_{period} = 0$}
+					\State Calculate $accuracy$ on the validation source dataset
+					\State $\threshold = adaptive\_threshold(accuracy, \rho)$
+					\For{each $d \in D_{target}$}
+						\State $label, confidence = model(d)$
+						\If{$confidence > \threshold$}
+							\State $D_{pseudo} = D_{pseudo} \cup \{d: label\}$
+							\State $D_{target} = D_{target} - \{d\}$
+						\EndIf
+					\EndFor
+				\EndIf
+				\State $D_{rand\_source}$ = \{\}
+				\State Select random samples from $D_{source}$ and add to $D_{rand\_source}$ such as $\lvert D_{rand\_source} \rvert = \lvert D_{pseudo} \rvert$
+				\State Train epoch on $D_{rand\_source}$
+				\State Train epoch on $D_{pseudo}$
+			\EndFor
+			
+		\end{algorithmic} 
+	\end{algorithm}
+
+
+	\subsection{Adaptive threshold}
+	\label{ssec:threshold}
+	
+	We use the same \texttt{adaptive threshold} function used in the original paper, which adjusts the confidence threshold used to decide whether to pseudo-label a sample. The function is defined as $adaptive\_threshold(acc, \rho) = \frac{1}{1+e^{-\rho*acc}}$, where $acc$ is the accuracy of the classifier, and $\rho$ a tunable hyperparameter, with $\rho=3$ in the original paper. We evaluate the classifier accuracy on the validation set of the source dataset.
+	
+	Higher $\rho$ values lead to a steeper decision curve, as see in Figure. The $\rho$ parameter is thus a very convenient way of tuning the pseudo-labeling procedure; a high $\rho$ value leads to samples chosen conservatively, ensuring that more samples are correctly labeled, while lower values lead to more samples overall being chosen, but with more incorrect labels. Since our strategy does not involve re-labeling of pseudo-labeled samples, and because of the lack of external mechanisms to detect outliers, we recommend that $\rho \in [3,4]$, although the value is dependent on the datasets and underlying classifier. The selected threshold as a function of the classifier's source validation accuracy can be found in Figure \ref{fig::adaptive_comparison}.
+	
+	\begin{figure}
+		\centering
+		\includegraphics[width=12cm]{"adaptive_threshold.jpeg"}
+		\caption{Required confidence score for a pseudo-labeled sample to be selected for training. Note the sigmoid shape, and the effect of $\rho$ on the curve's steepness.}
+		\label{fig::adaptive_comparison}
+	\end{figure}
+	
+	Overall, the adaptive threshold function provides us with an easy-to-understand mechanism which both adapts to the current state of the model, and which can be tuned with a single hyperparameter. This hyperparameter however remains of crucial importance, and should be tuned either by the number of accepted samples, or if available, a target validation dataset which tracks the pseudo-labeling misclassifications.
+	
+	
+	\subsection{Semi-supervised learning for learning domain-invariant features}
+	
+	One of the greatest challenges in the unsupervised pseudo-labeling approach is the distance between the source and target distributions, which may inhibit training. By using Algorithm \ref{al::modified-ican} during experimentation we noticed three dominant patterns in the evolution of the model:
+	
+	\begin{itemize}
+		\item The model selects samples liberally from $D_{target}$. As established in Section \ref{ssec:threshold}, this usually leads to a complete de-volution in training as the model makes increasingly more incorrect decisions, as it mislabels its own input.
+		
+		\item The model selects samples conservatively from a few classes. In this case, the model correctly attributes samples from a few easily distinguishable classes in $D_{target}$ ("calculator" and "keyboard" in our experiments). It then assumes that all samples bearing features from $D_{target}$ belong in these classes and begins mislabeling all other classes.
+		
+		\item The model selects samples much more conservatively but using most classes. This usually leads to a hyper-conservative model which selects samples only close to the original source distribution, and ends up disregarding a large portion of $D_{target}$.
+	\end{itemize}
+
+	In all three cases the underlying problem is that we can not, by design, expect a generic model to learn domain-invariant features. 
+	
+	A very simple way to partially overcome this problem is to label a small portion of $D_{target}$ and include it during the initial pretraining phase. In other words, we pretrain the model on $\tilde{D}_{source} = D_{source} \cup D_{labeled\_target}$, instead of $D_{source}$, where $D_{labeled\_target}$ is a stratified, labeled sample of $D_{target}$. This allows the model to bypass the conditions for the class imbalance problem described above, and may provide the opportunity for our model to more pick many additional samples during the first few rounds of pseudo-labeling bypassing the hyper-conservative model issue.
+	
+	
+	\section{Experiments}
+	
+	\subsection{Datasets}
+	
+	In this paper we examine the effects of "vanilla" pseudo-labeling on two main domain adaptation datasets focused on image classification. 
+	
+	The first domain adaptation task we explore is the "MNIST to MNIST-M" task. The MNIST dataset \parencite{mnist} is a widely-used benchmark in machine learning, particularly for handwritten digit recognition. It consists of 70,000 grayscale images of handwritten digits (0-9), split into 60,000 training images and 10,000 test images, each sized 28x28 pixels. MNIST-M \parencite{mnist-m} is a variant of the MNIST dataset created to present a more challenging domain adaptation problem. It overlays the original MNIST digits onto random background images extracted from color photos, adding variability and noise to the digit images. MNIST-M retains the same structure and digit classes as MNIST but introduces complex and colorful backgrounds to the 28x28 images.
+	
+	The second dataset is the Modern Office-31 dataset \parencite{modern-office}, a newly introduced dataset designed to serve as a drop-in replacement for the well-known Office-31 dataset \parencite{office}. It maintains the same 31 classes as Office-31 (computers, keyboards, and office furniture, captured in diverse settings and under different conditions), while also including real-life domain images from the original Office-31 webcam images and a cleaned Amazon domain, creating a comprehensive dataset with 7,210 images across three domains: Amazon, Synthetic, and Webcam. In this study, we use the "Amazon to Webcam" task to evaluate our model.
+	
+	Thus for our experiments, we can compare results with a task where the source and target distributions are fairly close (MNIST to MNIST-M), and one where they are significantly diverse from each other (Modern Office Amazon to Webcam). We hope to address in this way, the common criticism of evaluating domain adaptation tasks on tasks with similar domains, as noted by \cite{pseudo-label-evaluation}. A comparison of these datasets can be found in Table \ref{tab:dataset_characteristics}.
+	
+	\begin{table}
+		\centering
+		\renewcommand{\arraystretch}{1.5}
+		\begin{tabular}{>{\raggedright}p{5cm} >{\centering}p{4cm} >{\centering\arraybackslash}p{4cm}}
+			\toprule
+			& \textbf{MNIST/MNIST-M} & \textbf{Modern Office-31} \\
+			\midrule
+			\rowcolor{gray!20} \textbf{\#Samples (source)} & 70,000 & 2,817 \\
+			\textbf{\#Samples (target)} & 149,002 & 795 \\
+			\rowcolor{gray!20} \textbf{\#Classes} & 10 & 31 \\
+			\textbf{Task Difficulty} & Easy/Medium & High \\
+			\bottomrule
+		\end{tabular}
+		\caption{Dataset characteristics for MNIST/MNIST-M and Modern Office-31}
+		\label{tab:dataset_characteristics}
+	\end{table}
+	
+	
+	\subsection{Experimental Setup}
+	
+	For each domain adaptation task we produce three models as baselines; one trained on the source dataset, one on the target dataset, and one using Deep Correlation Alignment \parencite{coral} (referred to as "CORAL model" in this section) during training. The first two models serve as the lower and upper bounds of the classifiers' performance respectively, while the CORAL model represents as a useful comparison with a separate, robust and frequently used domain-adaptation algorithm.
+	
+	We then finetune three pretrained models on different source datasets; $D_{source}$ (unsupervised), $\tilde{D}_{source_{small}} = D_{source} \cup D_{labeled\_target_{\xi}}$ and $\tilde{D}_{source_{20}} = D_{source} \cup D_{labeled\_target_{y}}$ (semi-supervised), where $\xi$ and $y$ depend on the domain. For the Modern Office-31 datasets, the small and large datasets are comprised of 10\% and 20\% labeled samples respectively. For the MNIST/MNIST-M, the small dataset is comprised of 10 samples per classes, while the large one of 1\% labeled target domain data. The finetuned models are then used as input for the incremental learning algorithm outlined in Section \ref{ssec:our-algorithm}.
+	
+	We monitor two metrics for each of these models; the performance on the target test set, and the rate of pseudo-labeling misclassifications. Of course, the latter practically necessitates the a-priori knowledge of the pseudo-labeled samples' labels. We thus use this metric \textbf{only} as a post-analysis metric to demonstrate the efficiency of pseudo-labeling for each model and dataset, and \textbf{not as a validation metric} to tune the model's training. Our experience does suggest however that performing this procedure on a validation set can significantly help in both tuning hyperparameters, and diagnosing issues during training.
+	
+	We use the ResNet-18 model \parencite{resnet} for all experiments trained with the Adam optimizer ($lr=0.0005$). For the MNIST/MNIST-M dataset in particular, we use the PyTorch AdamW implementation with $weight\_decay = 10^{-3}$. We use different label smoothing parameters for the finetuning and incremental learning phases. We set $\alpha = 0.05$ for the finetuning task, and $\alpha = 0.15$ for the incremental learning, in order to account for the greater possibility of pseudo-labeled misclassifications. We set the adaptive threshold rate for the MNIST/MNIST-M task $\rho = 3$, as in its original paper \cite{ican}, and $\rho=4$ for the Modern Office-31 task, in order to account for the larger shift in distributions. Each ResNet model is pretrained on the ImageNet \cite{imagenet} dataset, before being finetuned on our respective source datasets. Datasets for both domains are randomly split in a 70\%-15\%-15\% training-validation-test split.
+	
+	For full documentation, as well as implementation notes and details, we recommend studying the provided notebook and source code files present in the accompanying repository \footnote{\url{https://github.com/dimits-ts/deep\_vision\_domain\_adaptation}}.
+	
+	
+	\subsection{Results}
+	
+	Table \ref{tab:comparison} presents the performance of various domain adaptation methods on the MNIST/MNIST-M and ModernOffice-31 datasets, highlighting the effectiveness of different training approaches. For the MNIST/MNIST-M dataset, the Source-only method yields a low accuracy of 33\% in contrast with the Target-only method, which achieves a high accuracy of 97\%. This comparison showcases the challenges of domain shift even in datasets with relatively similar distributions. Unsupervised adaptation slightly improves the accuracy to 37\%, demonstrating some benefit but indicating the limitations of purely unsupervised approaches. Supervised methods with a few labeled target data achieve high accuracies of 91\% without incremental learning and 94\% with incremental learning, showing the same rate of improvement with the source-only model. Similarly, using more labeled target data yields accuracies of 93\% for both incremental and non-incremental approaches, indicating that when extensive labeled data are present, pseudo-labeling does not yield any improvements in efficiency.
+	
+	For the Modern Office-31 dataset, the Source-only method achieves a mere 12\% accuracy, highlighting the increased distribution shift between the datasets. The Target-only method is marked as untrainable, due to the very limited number of target samples. Surprisingly, the CORAL method also fails in a similar way, likely due to the larger distribution shift combined with the relatively difficult task and limited data points. We hypothesize that these factors prevent the model from both learning domain-invariant features and efficiently solving the base task. Unsupervised adaptation improves accuracy to 25\%, suggesting some domain alignment. Supervised approaches with a few labeled target data achieve 23\% accuracy without incremental learning and 16\% with it, suggesting that incremental learning may not always be beneficial. With more labeled target data, the accuracies are 34\% and 33\% for non-incremental and incremental learning, respectively, indicating a notable improvement over unsupervised methods. 
+	
+	Figures \ref{fig::office_confusion}, \ref{fig::mnist_confusion} show the confusion matrices for the Modern Office-31 Webcam and MNIST-M test sets respectively. Each figure contains the respective matrices for each model using the incremental learning algorithm. Note that the Unsupervised approach seems to yield significant improvements, preventing the model from classifying all target-domain samples in one class, as seen in Figure \ref{fig::office_confusion}. The Semi-Supervised-10 and Semi-Supervised-20 models further refine these classifications.
+	
+	\begin{table}
+		\centering
+		\renewcommand{\arraystretch}{1.5}
+		\begin{tabular}{>{\raggedright}p{3.5cm} >{\centering}p{5cm} >{\centering\arraybackslash}p{5cm}}
+			\toprule
+			& \textbf{MNIST/MNIST-M} & \textbf{Modern Office-31} \\
+			\midrule
+			\rowcolor{gray!20} \textbf{Source-only} & 33\% & 12\%\\
+			\textbf{Target-only} & 97\% & Untrainable \\
+			\rowcolor{gray!20} 	\textbf{CORAL model} & 97\% & Untrainable \\
+			\textbf{Unsupervised pseudo-labeling} & 47\% & 25\% \\
+			\rowcolor{gray!20}\textbf{Semi-Supervised Small} & 46\% & 23\%\\
+			\textbf{Semi-Supervised Small + pseudo-labeling} & 60\% & 16\% \\
+			\rowcolor{gray!20}\textbf{Semi-Supervised Large} & 79\% & 34\% \\
+			\textbf{Semi-Supervised Large + pseudo-labeling} & 86\% & 33\% \\
+			\bottomrule
+		\end{tabular}
+		\caption{Comparison of different methods on MNIST/MNIST-M and Modern Office-31}
+		\label{tab:comparison}
+	\end{table}
+	
+	\begin{figure}
+		\centering
+		\includegraphics[width=12cm]{"office_cls_matrix.jpeg"}
+		\caption{Confusion matrix for the target-domain (Modern Office-31: Webcam) test set.}
+		\label{fig::office_confusion}
+	\end{figure}
+	
+	\begin{figure}
+		\centering
+		\includegraphics[width=12cm]{"mnist_cls_matrix.jpeg"}
+		\caption{Confusion matrix for the target-domain (MNIST-M) test set.}
+		\label{fig::mnist_confusion}
+	\end{figure}
+	
+	
+	\subsection{Performance impact of misclassifications}
+	
+	
+	Figures \ref{fig::office_misclassifications}, \ref{fig::mnist_misclassifications} display the number of selected pseudo-labeled samples for each sampling period ($N_{period}=20$ for the Modern Office-31 datasets, and $N_{period}=7$ for MNIST/MNIST-M), as well as the rate of misclassifications for the Modern Office-31 Webcam and MNIST-M test sets respectively. 
+	
+	The selection pattern for the Modern Office-31: Webcam is different for each of the three models, as seen in Figure \ref{fig::office_misclassifications}. The unsupervised model is able to consistently classify samples correctly at a steady rate, while the semi-supervised models seem to significantly suffer from misclassifications from the 2nd sampling period and on-wards. Of note is that the Semi-Supervised-20 model correctly classifies an extensive number of samples at the first sampling period (90 samples vs 10-15 from the other models). This can be explained by the model being able to recognize instantly all the easily-classifiable samples in the unlabeled dataset, and thus struggles to classify the rest for the rest of the training period. 
+	
+	Results on the MNIST-M dataset demonstrate a different pattern. As shown in Figure \ref{fig::mnist_misclassifications}, all three models largely collect samples one and refuse to do so again later. This is largely a problem caused by the adaptive threshold algorithm, since after a few iterations the model is so confident overall, that all unlabeled images are deemed too "unsure" to be selected.
+	
+	It's worth noting that in both datasets, a substantial amount of the target dataset ends up being used, although never the entire target-domain train set.
+
+	
+	\begin{figure}
+		\centering
+		\includegraphics[width=12cm]{"office_misclassifications.jpeg"}
+		\caption{Pseudo-labeled samples from the unlabeled target domain (Modern Office-31: Webcam) selected during the incremental learning algorithm.}
+		\label{fig::office_misclassifications}
+	\end{figure}
+
+	\begin{figure}
+		\centering
+		\includegraphics[width=12cm]{"mnist_misclassifications.jpeg"}
+		\caption{Pseudo-labeled samples from the unlabeled target domain (MNIST-M) selected during the incremental learning algorithm.}
+		\label{fig::mnist_misclassifications}
+	\end{figure}
+
+	\section{Conclusion}
+	
+	In this study, we have presented a modified version of the iCAN algorithm for unsupervised and semi-supervised domain adaptation tasks, specifically focusing on the MNIST/MNIST-M and Modern Office-31 datasets. Our experiments demonstrated the effectiveness of our modified algorithm in comparison to other domain adaptation methods, as well as the impact of misclassifications in the pseudo-labeling process.
+	
+	Our findings indicate that unsupervised pseudo-labeling can lead to improved performance on target-domain test sets, especially when the source and target distributions are relatively close, as in the MNIST/MNIST-M case. However, the effectiveness of unsupervised pseudo-labeling diminishes when the distributions are significantly different, as observed in the Modern Office-31 dataset. In such cases, incorporating a small amount of labeled target data during the initial pretraining phase can help alleviate the challenges associated with the distribution shift, yielding better performance than purely unsupervised methods. Additional labeled data however do not always lead to more effective learning by themselves.
+	
+	It is important to note that the performance of our modified algorithm is highly dependent on the choice of the adaptive threshold parameter, $\rho$. Proper tuning of this parameter is crucial to ensure the selection of high-confidence samples for training while avoiding incorrect pseudo-labeling. Additionally, our results suggest that the use of an adaptive threshold function could be further improved to prevent models from becoming overly confident and refusing to select samples in later iterations.
+
+	
+	\printbibliography
+\end{document}
